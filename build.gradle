@@ -110,8 +110,11 @@ allprojects {
         maven {
             url kotlinCompilerRepo
         }
+//        maven {
+//            url "https://dl.bintray.com/kotlin/kotlin-dev"
+//        }
         maven {
-            url "https://dl.bintray.com/kotlin/kotlin-dev"
+            url "/Users/jetbrains/IdeaProjects/kotlin/build/repo"
         }
     }
 
