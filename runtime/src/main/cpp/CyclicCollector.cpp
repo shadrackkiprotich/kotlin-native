@@ -44,13 +44,15 @@
  * elements of the atomic rootset:
  *   - if it is being increased, then someone already got an external reference to this element, thus we may not
  *    end up matching the inner reference count anyway
- *   - if it is being decreased and it become garbage, it will be collected next time
- * If transitive closure of the atomic rootset mutates, it could only happen via changing the atomics references.
+ *   - if it is being decreased and object become garbage, it will be collected next time
+ * If transitive closure of the atomic rootset mutates, it could only happen via changing the atomics references,
+ * as all others elements of this closure is frozen.
  * To avoid that we leave all locks associated with atomic references taken during the transitive closure walking.
  * All locks are released once we finish the transitive closure walking.
  * TODO: can we do better than that?
- * There are some complications in this algorithm due to delayed reference counting: namely it means we have to execute
- * callback on each worker which will take into account reference counts coming from the stack references.
+ * There are some complications in this algorithm due to delayed reference counting: namely we have to execute
+ * callback on each worker which will take into account reference counts coming from the stack references of such
+ * a worker.
  * It means, we could perform actual collection only after all registered workers completed rendevouz which performs
  * such accounting.
  */
