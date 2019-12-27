@@ -36,6 +36,7 @@ internal class InteropBuiltIns(builtIns: KonanBuiltIns) {
     val cValues = this.packageScope.getContributedClass("CValues")
     val cValue = this.packageScope.getContributedClass("CValue")
     val cOpaque = this.packageScope.getContributedClass("COpaque")
+    val cEnum = this.packageScope.getContributedClass("CEnum")
     val cValueWrite = this.packageScope.getContributedFunctions("write")
             .single { it.extensionReceiverParameter?.type?.constructor?.declarationDescriptor == cValue }
     val cValueRead = this.packageScope.getContributedFunctions("readValue")

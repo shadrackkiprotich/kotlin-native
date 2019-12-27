@@ -264,7 +264,7 @@ internal class EnumStubBuilder(
                 methods = listOf(byValueFunction)
         )
 
-        val enumVar = constructEnumVarClass()
+        val enumVarClass = constructEnumVarClass()
 
         val enum = ClassStub.Enum(
                 classifier = classifier,
@@ -275,12 +275,13 @@ internal class EnumStubBuilder(
                 origin = origin,
                 // TODO: Enums should inherit from Enum<T>
                 interfaces = listOf(context.platform.getRuntimeType("CEnum"))
+//                childrenClasses = listOf(enumVarClass)
         )
         context.bridgeComponentsBuilder.enumToTypeMirror[enum] = baseTypeMirror
         return listOf(enum)
     }
 
-    private fun constructEnumVarClass(): ClassStub.Enum {
+    private fun constructEnumVarClass(): ClassStub.Simple {
 
         val rawPtrConstructorParam = FunctionParameterStub("rawPtr", context.platform.getRuntimeType("NativePtr"))
         val superClass = context.platform.getRuntimeType("CEnumVar")
@@ -295,17 +296,19 @@ internal class EnumStubBuilder(
         val superClassInit = SuperClassInit(superClass, listOf(GetConstructorParameter(rawPtrConstructorParam)))
 
         val companionSuper = superClass.nested("Type")
-        val typeSize = listOf(IntegralConstantStub(def.size, 4, true), IntegralConstantStub(def.align.toLong(), 4, true))
-        val companionSuperInit = SuperClassInit(companionSuper, typeSize)
+//        val typeSize = listOf(IntegralConstantStub(def.size, 4, true))
+//        val companionSuperInit = SuperClassInit(companionSuper, typeSize)
         val companionClassifier = classifier.nested("Companion")
-        val companion = ClassStub.Companion(companionClassifier, emptyList(), companionSuperInit)
+        val companion = ClassStub.Companion(companionClassifier, emptyList(), null)
 
 
         return ClassStub.Simple(
                 classifier = classifier.nested("Var"),
                 constructors = listOf(primaryConstructor),
                 superClassInit = superClassInit,
-                companion = companion
+                companion = companion,
+                modality = ClassStubModality.NONE,
+                origin = StubOrigin.VarOf(StubOrigin.Enum(enumDef))
         )
     }
 

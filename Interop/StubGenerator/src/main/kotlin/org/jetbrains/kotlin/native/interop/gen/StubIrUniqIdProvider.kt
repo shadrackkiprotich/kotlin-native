@@ -63,6 +63,7 @@ internal class StubIrUniqIdProvider(private val context: ManglingContext) {
         }
         is StubOrigin.Struct -> origin.struct.uniqueSymbolName
         is StubOrigin.Enum -> origin.enum.uniqueSymbolName
+        is StubOrigin.VarOf -> "${uniqSymbolNameForClass(origin.typeOrigin)}#Var"
         else -> null
     }
 

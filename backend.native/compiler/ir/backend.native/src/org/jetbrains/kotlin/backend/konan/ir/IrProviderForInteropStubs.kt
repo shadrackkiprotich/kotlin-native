@@ -4,27 +4,32 @@
  */
 package org.jetbrains.kotlin.backend.konan.ir
 
+import org.jetbrains.kotlin.backend.konan.InteropBuiltIns
 import org.jetbrains.kotlin.backend.konan.descriptors.isFromInteropLibrary
+import org.jetbrains.kotlin.descriptors.isFinalOrEnum
 import org.jetbrains.kotlin.ir.UNDEFINED_OFFSET
 import org.jetbrains.kotlin.ir.declarations.*
 import org.jetbrains.kotlin.ir.declarations.lazy.*
 import org.jetbrains.kotlin.ir.symbols.*
 import org.jetbrains.kotlin.ir.util.*
+import org.jetbrains.kotlin.resolve.descriptorUtil.getAllSuperClassifiers
 import org.jetbrains.kotlin.resolve.descriptorUtil.module
 
 /**
  * Generates external IR declarations for descriptors from interop libraries.
  */
-class IrProviderForInteropStubs : LazyIrProvider {
+internal class IrProviderForInteropStubs(
+        private val interopBuiltIns: InteropBuiltIns
+) : LazyIrProvider {
 
     override lateinit var declarationStubGenerator: DeclarationStubGenerator
 
-    override fun getDeclaration(symbol: IrSymbol): IrLazyDeclarationBase? =
-            if (symbol.descriptor.module.isFromInteropLibrary()) {
-                provideIrDeclaration(symbol)
-            } else {
-                null
-            }
+    override fun getDeclaration(symbol: IrSymbol): IrLazyDeclarationBase? = when {
+        !symbol.descriptor.module.isFromInteropLibrary() -> null
+        symbol is IrEnumEntrySymbol -> null
+        symbol.isCEnumSymbol(interopBuiltIns) -> null
+        else -> provideIrDeclaration(symbol)
+    }
 
     private fun provideIrDeclaration(symbol: IrSymbol): IrLazyDeclarationBase = when (symbol) {
         is IrSimpleFunctionSymbol -> provideIrFunction(symbol)
@@ -104,4 +109,9 @@ class IrProviderForInteropStubs : LazyIrProvider {
                     IrDeclarationOrigin.IR_EXTERNAL_DECLARATION_STUB,
                     symbol, declarationStubGenerator, declarationStubGenerator.typeTranslator
             )
+}
+
+private fun IrSymbol.isCEnumSymbol(interopBuiltIns: InteropBuiltIns): Boolean {
+    if (this !is IrClassSymbol) return false
+    return interopBuiltIns.cEnum in this.descriptor.getAllSuperClassifiers()
 }

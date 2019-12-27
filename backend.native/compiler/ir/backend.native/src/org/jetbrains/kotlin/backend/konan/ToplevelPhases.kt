@@ -8,6 +8,7 @@ import org.jetbrains.kotlin.backend.common.serialization.DescriptorTable
 import org.jetbrains.kotlin.backend.common.serialization.metadata.KlibMetadataMonolithicSerializer
 import org.jetbrains.kotlin.backend.konan.descriptors.isForwardDeclarationModule
 import org.jetbrains.kotlin.backend.konan.descriptors.konanLibrary
+import org.jetbrains.kotlin.backend.konan.ir.IrProviderForCEnumStubs
 import org.jetbrains.kotlin.backend.konan.ir.IrProviderForInteropStubs
 import org.jetbrains.kotlin.backend.konan.ir.KonanSymbols
 import org.jetbrains.kotlin.backend.konan.llvm.*
@@ -197,13 +198,14 @@ internal val psiToIrPhase = konanUnitPhase(
 
             val functionIrClassFactory = BuiltInFictitiousFunctionIrClassFactory(
                     symbolTable, generatorContext.irBuiltIns, reflectionTypes)
-            val irProviderForInteropStubs = IrProviderForInteropStubs()
+            val irProviderForInteropStubs = IrProviderForInteropStubs(interopBuiltIns)
+            val irProviderForCEnums = IrProviderForCEnumStubs(symbolTable, generatorContext, interopBuiltIns)
             val symbols = KonanSymbols(this, symbolTable, symbolTable.lazyWrapper, functionIrClassFactory)
             val stubGenerator = DeclarationStubGenerator(
                     moduleDescriptor, symbolTable,
                     config.configuration.languageVersionSettings
             )
-            val irProviders = listOf(irProviderForInteropStubs, functionIrClassFactory, deserializer, stubGenerator)
+            val irProviders = listOf(irProviderForInteropStubs, irProviderForCEnums, functionIrClassFactory, deserializer, stubGenerator)
             stubGenerator.setIrProviders(irProviders)
             val module = translator.generateModuleFragment(generatorContext, environment.getSourceFiles(), irProviders)
 
