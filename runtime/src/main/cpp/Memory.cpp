@@ -119,6 +119,9 @@ KInt g_leakCheckerGlobalLock = 0;
 THREAD_LOCAL_VARIABLE MemoryState* memoryState = nullptr;
 THREAD_LOCAL_VARIABLE FrameOverlay* currentFrame = nullptr;
 
+bool g_hasCyclicCollector = true;
+
+
 #if COLLECT_STATISTIC
 class MemoryStatistic {
 public:
@@ -3166,14 +3169,7 @@ KRef* LookupTLS(void** key, int index) {
   return start + index;
 }
 
-/**
- * Theory of operations: Kotlin/Native runtime allows basic garbage collection for event-driven programs
- * by cooperative safepointing across event loops on event processing and searching leak candidates amongst
- * the shared objects, such as `AtomicReference` and `FreezableAtomicReference` instances.
- * We perform such analysis by pausing execution and finding cyclic references among candidates, those which
- * participate in a cycle are remembered for the further analysis. Further analysis involves checking if particular
- * candidate is only reachable from itself and other candidates using externalized trial deletion.
- */
+
 void GC_RegisterWorker(void* worker) {
   konan::consolePrintf("register %p\n", worker);
   cyclicAddWorker(worker);
@@ -3186,7 +3182,16 @@ void GC_UnregisterWorker(void* worker) {
 
 void GC_RendezvouzCallback(void* worker) {
   konan::consolePrintf("%p: alive %d, I am %p\n", worker, aliveMemoryStatesCount, memoryState);
-  cyclicRendezvouz(worker);
+  if (g_hasCyclicCollector)
+    cyclicRendezvouz(worker);
+}
+
+KBoolean Kotlin_native_internal_GC_getCyclicCollector() {
+  return g_hasCyclicCollector;
+}
+
+void Kotlin_native_internal_GC_setCyclicCollector(KBoolean value) {
+  g_hasCyclicCollector = value;
 }
 
 } // extern "C"

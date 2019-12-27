@@ -30,6 +30,30 @@
 #endif
 
 #if WITH_WORKERS
+/**
+ * Theory of operations:
+ *
+ * Kotlin/Native runtime allows incremental cyclic garbage collection for the shared objects,
+ * such as `AtomicReference` and `FreezableAtomicReference` instances (further known as the atomic rootset).
+ * We perform such analysis by iterating over the transitive closure of the atomic rootset, and computing
+ * aggregated inner reference counter for rootset elements over this transitive closure.
+ * Atomic rootset is built by maintaining the linked list of all atomic and freezable atomic references objects.
+ * Elements whose transitive closure inner reference count matches the actual reference count are ones
+ * belonging to the garbage cycles and thus can be discarded.
+ * If during computations of the aggregated RC there were modifications in the reference counts of
+ * elements of the atomic rootset:
+ *   - if it is being increased, then someone already got an external reference to this element, thus we may not
+ *    end up matching the inner reference count anyway
+ *   - if it is being decreased and it become garbage, it will be collected next time
+ * If transitive closure of the atomic rootset mutates, it could only happen via changing the atomics references.
+ * To avoid that we leave all locks associated with atomic references taken during the transitive closure walking.
+ * All locks are released once we finish the transitive closure walking.
+ * TODO: can we do better than that?
+ * There are some complications in this algorithm due to delayed reference counting: namely it means we have to execute
+ * callback on each worker which will take into account reference counts coming from the stack references.
+ * It means, we could perform actual collection only after all registered workers completed rendevouz which performs
+ * such accounting.
+ */
 namespace {
 
 class Locker {
@@ -54,7 +78,7 @@ class CyclicCollector {
   void* firstWorker_;
   ArrayHeader* roots_;
   ObjHolder rootsHolder_;
-  KStdVector<int> rootsRefCounts_;
+  KStdMap<ObjHeader*, int> rootsRefCounts_;
 
   uint32_t currentTick_;
   uint32_t lastTick_;
@@ -142,11 +166,18 @@ void CyclicCollector::rendezvouzHandler() {
     if (roots_ != nullptr) {
       ObjHeader** current = ArrayAddressOfElementAt(roots_, 0);
       auto count = roots_->count_;
-      rootsRefCounts_.reserve(count);
+      // Remember the value of the reference counter at the rendevouz moment.
       for (int i = 0; i < count; i++, current++) {
         ObjHeader* obj = *current;
-        rootsRefCounts_[i] = obj->container()->refCount();
+        rootsRefCounts_[obj] = obj->container()->refCount();
       }
+      // Let others increment RCs according to their stack slots.
+      //......
+      // Finally, in the GC phase we'll do the following: we compute effective RC
+      // coming from inner references of collected cycles. For objects with coinciding values
+      // - it means there's no external references and we can collect such objects. We may not
+      // even do that, and instead just zero out all object references coming out of such objects -
+      // effect will be the same.
       shallCollectGarbage_ = true;
     }
   }

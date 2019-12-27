@@ -78,6 +78,14 @@ object GC {
         get() = getTuneThreshold()
         set(value) = setTuneThreshold(value)
 
+
+    /**
+     * If cyclic collector for atomic references to be deployed.
+     */
+    var cyclicCollector: Boolean
+        get() = getCyclicCollector()
+        set(value) = setCyclicCollector(value)
+
     /**
      * Detect cyclic references going via atomic references and return list of cycle-inducing objects
      * or `null` if the leak detector is not available. Use [Platform.isMemoryLeakCheckerActive] to check
@@ -113,4 +121,10 @@ object GC {
 
     @SymbolName("Kotlin_native_internal_GC_setTuneThreshold")
     private external fun setTuneThreshold(value: Boolean)
+
+    @SymbolName("Kotlin_native_internal_GC_getCyclicCollector")
+    private external fun getCyclicCollector(): Boolean
+
+    @SymbolName("Kotlin_native_internal_GC_setCyclicCollector")
+    private external fun setCyclicCollector(value: Boolean)
 }
