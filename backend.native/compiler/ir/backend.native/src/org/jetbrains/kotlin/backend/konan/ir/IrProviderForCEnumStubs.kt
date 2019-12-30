@@ -1,11 +1,15 @@
 package org.jetbrains.kotlin.backend.konan.ir
 
+import org.jetbrains.kotlin.backend.common.ir.addFakeOverrides
+import org.jetbrains.kotlin.backend.common.ir.createParameterDeclarations
+import org.jetbrains.kotlin.backend.common.serialization.proto.IrConst
 import org.jetbrains.kotlin.backend.konan.InteropBuiltIns
 import org.jetbrains.kotlin.backend.konan.descriptors.enumEntries
 import org.jetbrains.kotlin.backend.konan.descriptors.isFromInteropLibrary
 import org.jetbrains.kotlin.descriptors.ClassDescriptor
 import org.jetbrains.kotlin.ir.declarations.*
 import org.jetbrains.kotlin.ir.expressions.impl.IrBlockBodyImpl
+import org.jetbrains.kotlin.ir.expressions.impl.IrConstImpl
 import org.jetbrains.kotlin.ir.expressions.impl.IrEnumConstructorCallImpl
 import org.jetbrains.kotlin.ir.expressions.impl.IrInstanceInitializerCallImpl
 import org.jetbrains.kotlin.ir.symbols.IrClassSymbol
@@ -63,24 +67,22 @@ internal class IrProviderForCEnumStubs(
                 descriptor = descriptor
         ).also { enumIrClass ->
             context.symbolTable.withScope(descriptor) {
-                enumIrClass.thisReceiver = context.symbolTable.declareValueParameter(
-                        startOffset = SYNTHETIC_OFFSET,
-                        endOffset = SYNTHETIC_OFFSET,
-                        origin = IrDeclarationOrigin.INSTANCE_RECEIVER,
-                        descriptor = descriptor.thisAsReceiverParameter,
-                        type = descriptor.thisAsReceiverParameter.type.toIrType()
-                )
+                descriptor.typeConstructor.supertypes.mapTo(enumIrClass.superTypes) {
+                    it.toIrType()
+                }
+                enumIrClass.createParameterDeclarations()
+                enumIrClass.addFakeOverrides()
                 enumClassMembersGenerator.generateSpecialMembers(enumIrClass)
                 enumIrClass.addMember(createPrimaryConstructor(descriptor).also {
                     it.parent = enumIrClass
                 })
                 descriptor.enumEntries.mapTo(enumIrClass.declarations) { entryDescriptor ->
-                    createEnumEntry(entryDescriptor).also { it.parent = enumIrClass }
+                    createEnumEntry(descriptor, entryDescriptor).also { it.parent = enumIrClass }
                 }
             }
         }
 
-    private fun createEnumEntry(entryDescriptor: ClassDescriptor): IrEnumEntry {
+    private fun createEnumEntry(enumDescriptor: ClassDescriptor, entryDescriptor: ClassDescriptor): IrEnumEntry {
         return symbolTable.declareEnumEntry(
                 startOffset = SYNTHETIC_OFFSET,
                 endOffset = SYNTHETIC_OFFSET,
@@ -91,9 +93,11 @@ internal class IrProviderForCEnumStubs(
                     startOffset = SYNTHETIC_OFFSET,
                     endOffset = SYNTHETIC_OFFSET,
                     type = context.irBuiltIns.unitType,
-                    symbol = context.symbolTable.referenceConstructor(enumEntryConstructor),
+                    symbol = context.symbolTable.referenceConstructor(enumDescriptor.unsubstitutedPrimaryConstructor!!),
                     typeArgumentsCount = 0 // enums can't be generic
-            )
+            ).apply {
+                putValueArgument(0, IrConstImpl.int(SYNTHETIC_OFFSET, SYNTHETIC_OFFSET, context.irBuiltIns.intType, 1))
+            }
         }
     }
 
