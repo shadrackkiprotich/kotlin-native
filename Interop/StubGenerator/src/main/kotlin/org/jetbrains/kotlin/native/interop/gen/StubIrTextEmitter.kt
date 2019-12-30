@@ -384,7 +384,9 @@ class StubIrTextEmitter(
         }
         val constructorParams = classStub.explicitPrimaryConstructor?.parameters?.let(this::renderConstructorParams) ?: ""
         val inheritance = mutableListOf<String>().apply {
-            addIfNotNull(classStub.superClassInit?.let { renderSuperInit(it) })
+            if (classStub !is ClassStub.Enum) {
+                addIfNotNull(classStub.superClassInit?.let { renderSuperInit(it) })
+            }
             addAll(classStub.interfaces.map { renderStubType(it) })
         }.let { if (it.isNotEmpty()) " : ${it.joinToString()}" else "" }
 

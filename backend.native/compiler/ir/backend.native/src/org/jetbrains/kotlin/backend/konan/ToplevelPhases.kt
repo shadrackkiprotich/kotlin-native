@@ -220,6 +220,8 @@ internal val psiToIrPhase = konanUnitPhase(
             functionIrClassFactory.module =
                     (listOf(irModule!!) + deserializer.modules.values)
                             .single { it.descriptor.isKonanStdlib() }
+
+            irProviderForCEnums.module = irModule!!
         },
         name = "Psi2Ir",
         description = "Psi to IR conversion",

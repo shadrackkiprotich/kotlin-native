@@ -5,9 +5,12 @@ import org.jetbrains.kotlin.backend.common.ir.createParameterDeclarations
 import org.jetbrains.kotlin.backend.common.serialization.proto.IrConst
 import org.jetbrains.kotlin.backend.konan.InteropBuiltIns
 import org.jetbrains.kotlin.backend.konan.descriptors.enumEntries
+import org.jetbrains.kotlin.backend.konan.descriptors.findPackage
 import org.jetbrains.kotlin.backend.konan.descriptors.isFromInteropLibrary
 import org.jetbrains.kotlin.descriptors.ClassDescriptor
+import org.jetbrains.kotlin.descriptors.PackageFragmentDescriptor
 import org.jetbrains.kotlin.ir.declarations.*
+import org.jetbrains.kotlin.ir.declarations.impl.IrFileImpl
 import org.jetbrains.kotlin.ir.expressions.impl.IrBlockBodyImpl
 import org.jetbrains.kotlin.ir.expressions.impl.IrConstImpl
 import org.jetbrains.kotlin.ir.expressions.impl.IrEnumConstructorCallImpl
@@ -16,6 +19,7 @@ import org.jetbrains.kotlin.ir.symbols.IrClassSymbol
 import org.jetbrains.kotlin.ir.symbols.IrEnumEntrySymbol
 import org.jetbrains.kotlin.ir.symbols.IrSymbol
 import org.jetbrains.kotlin.ir.util.*
+import org.jetbrains.kotlin.ir.util.NaiveSourceBasedFileEntryImpl
 import org.jetbrains.kotlin.psi2ir.generators.DeclarationGenerator
 import org.jetbrains.kotlin.psi2ir.generators.EnumClassMembersGenerator
 import org.jetbrains.kotlin.psi2ir.generators.GeneratorContext
@@ -23,6 +27,7 @@ import org.jetbrains.kotlin.resolve.descriptorUtil.getAllSuperClassifiers
 import org.jetbrains.kotlin.resolve.descriptorUtil.module
 import org.jetbrains.kotlin.types.KotlinType
 
+// TODO: Consider unification with FunctionIrProvider
 internal class IrProviderForCEnumStubs(
         private val symbolTable: SymbolTable,
         private val context: GeneratorContext,
@@ -35,6 +40,20 @@ internal class IrProviderForCEnumStubs(
     private val enumClassMembersGenerator =
             EnumClassMembersGenerator(DeclarationGenerator(context))
 
+    private val filesMap = mutableMapOf<PackageFragmentDescriptor, IrFile>()
+    private val enumClasses = mutableListOf<IrClass>()
+
+    var module: IrModuleFragment? = null
+        set(value) {
+            if (value == null)
+                error("Provide a valid non-null module")
+            if (field != null)
+                error("Module has already been set")
+            field = value
+            value.files += filesMap.values
+            enumClasses.forEach { it.addFakeOverrides() }
+        }
+
     override fun getDeclaration(symbol: IrSymbol): IrDeclaration? = when {
         !symbol.descriptor.module.isFromInteropLibrary() ->
             null
@@ -46,7 +65,7 @@ internal class IrProviderForCEnumStubs(
             null
     }
 
-    // Do we need to declare parental IrClass?
+    // TODO: Do we need to declare parental IrClass?
     private fun provideIrEnumEntry(symbol: IrEnumEntrySymbol): IrEnumEntry {
         val enumClassDescriptor = symbol.descriptor.containingDeclaration as ClassDescriptor
         val irClassSymbol = symbolTable.referenceClass(enumClassDescriptor)
@@ -71,7 +90,6 @@ internal class IrProviderForCEnumStubs(
                     it.toIrType()
                 }
                 enumIrClass.createParameterDeclarations()
-                enumIrClass.addFakeOverrides()
                 enumClassMembersGenerator.generateSpecialMembers(enumIrClass)
                 enumIrClass.addMember(createPrimaryConstructor(descriptor).also {
                     it.parent = enumIrClass
@@ -80,6 +98,15 @@ internal class IrProviderForCEnumStubs(
                     createEnumEntry(descriptor, entryDescriptor).also { it.parent = enumIrClass }
                 }
             }
+
+            val packageFragmentDescriptor = descriptor.findPackage()
+            val file = filesMap.getOrPut(packageFragmentDescriptor) {
+                IrFileImpl(NaiveSourceBasedFileEntryImpl("CEnums"), packageFragmentDescriptor).also {
+                    this@IrProviderForCEnumStubs.module?.files?.add(it)
+                }
+            }
+            enumIrClass.parent = file
+            file.declarations += enumIrClass
         }
 
     private fun createEnumEntry(enumDescriptor: ClassDescriptor, entryDescriptor: ClassDescriptor): IrEnumEntry {
@@ -119,6 +146,8 @@ internal class IrProviderForCEnumStubs(
                 origin = IrDeclarationOrigin.IR_EXTERNAL_DECLARATION_STUB,
                 descriptor = descriptor.unsubstitutedPrimaryConstructor!!
         )
+        irConstructor.body = irBlockBody
+        irConstructor.returnType = irConstructor.descriptor.returnType.toIrType()
         return irConstructor
     }
 

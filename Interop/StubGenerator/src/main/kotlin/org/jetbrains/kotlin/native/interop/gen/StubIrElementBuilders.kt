@@ -263,11 +263,11 @@ internal class EnumStubBuilder(
                 properties = canonicalEntriesWithAliases.flatMap { it.second },
                 methods = listOf(byValueFunction)
         )
-
         val enumVarClass = constructEnumVarClass()
-
+        val kotlinEnumType = ClassifierStubType(Classifier.topLevel("kotlin", "Enum"), listOf(TypeArgumentStub(ClassifierStubType(classifier))))
         val enum = ClassStub.Enum(
                 classifier = classifier,
+                superClassInit = SuperClassInit(kotlinEnumType),
                 entries = canonicalEntriesWithAliases.map { it.first },
                 companion = companion,
                 constructors = listOf(primaryConstructor),
