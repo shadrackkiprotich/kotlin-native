@@ -109,12 +109,21 @@ internal class ModuleMetadataEmitter(
             return listOf(kmClass) + elements.classes
         }
 
-        private fun mapEnumEntry(enumEntry: EnumEntryStub, data: VisitingContext) = KlibEnumEntry(
-                name = enumEntry.name,
-                uniqId = data.uniqIds.uniqIdForEnumEntry(enumEntry, data.container as ClassStub.Enum),
-                ordinal = 0,
-                annotations = mutableListOf()
-        )
+        private fun mapEnumEntry(enumEntry: EnumEntryStub, data: VisitingContext): KlibEnumEntry =
+                with (MappingExtensions(data.typeParametersInterner)) {
+                    KlibEnumEntry(
+                            name = enumEntry.name,
+                            uniqId = data.uniqIds.uniqIdForEnumEntry(enumEntry, data.container as ClassStub.Enum),
+                            ordinal = enumEntry.ordinal,
+                            annotations = mutableListOf(
+                                    KmAnnotation(
+                                            enumEntry.constant.determineEnumEntryClassifier().fqNameSerialized,
+                                            mapOf("value" to enumEntry.constant.mapToAnnotationArgument())
+                                    )
+                            )
+                    )
+                }
+
 
         override fun visitTypealias(element: TypealiasStub, data: VisitingContext): KmTypeAlias =
                 with (MappingExtensions(data.typeParametersInterner)) {
@@ -489,4 +498,12 @@ private class MappingExtensions(
 
     private val TypeParameterStub.id: Int
         get() = typeParametersInterner.intern(this)
+
+    fun IntegralConstantStub.determineEnumEntryClassifier(): Classifier = when (size) {
+        1 -> if (isSigned) "Byte" else "UByte"
+        2 -> if (isSigned) "Short" else "UShort"
+        4 -> if (isSigned) "Int" else "UInt"
+        8 -> if (isSigned) "Long" else "ULong"
+        else -> error("Integral constant with unexpected size of ${size}.")
+    }.let { Classifier.topLevel(cinteropInternalPackage, "CEnumEntryValue").nested(it) }
 }

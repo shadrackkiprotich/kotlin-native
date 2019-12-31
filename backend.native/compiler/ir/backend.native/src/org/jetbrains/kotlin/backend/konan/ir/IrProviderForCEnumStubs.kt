@@ -2,17 +2,19 @@ package org.jetbrains.kotlin.backend.konan.ir
 
 import org.jetbrains.kotlin.backend.common.ir.addFakeOverrides
 import org.jetbrains.kotlin.backend.common.ir.createParameterDeclarations
-import org.jetbrains.kotlin.backend.common.serialization.proto.IrConst
 import org.jetbrains.kotlin.backend.konan.InteropBuiltIns
 import org.jetbrains.kotlin.backend.konan.descriptors.enumEntries
 import org.jetbrains.kotlin.backend.konan.descriptors.findPackage
 import org.jetbrains.kotlin.backend.konan.descriptors.isFromInteropLibrary
 import org.jetbrains.kotlin.descriptors.ClassDescriptor
 import org.jetbrains.kotlin.descriptors.PackageFragmentDescriptor
+import org.jetbrains.kotlin.descriptors.PropertyDescriptor
+import org.jetbrains.kotlin.ir.builders.declarations.addField
+import org.jetbrains.kotlin.ir.builders.declarations.addGetter
 import org.jetbrains.kotlin.ir.declarations.*
 import org.jetbrains.kotlin.ir.declarations.impl.IrFileImpl
+import org.jetbrains.kotlin.ir.expressions.IrExpression
 import org.jetbrains.kotlin.ir.expressions.impl.IrBlockBodyImpl
-import org.jetbrains.kotlin.ir.expressions.impl.IrConstImpl
 import org.jetbrains.kotlin.ir.expressions.impl.IrEnumConstructorCallImpl
 import org.jetbrains.kotlin.ir.expressions.impl.IrInstanceInitializerCallImpl
 import org.jetbrains.kotlin.ir.symbols.IrClassSymbol
@@ -20,12 +22,15 @@ import org.jetbrains.kotlin.ir.symbols.IrEnumEntrySymbol
 import org.jetbrains.kotlin.ir.symbols.IrSymbol
 import org.jetbrains.kotlin.ir.util.*
 import org.jetbrains.kotlin.ir.util.NaiveSourceBasedFileEntryImpl
+import org.jetbrains.kotlin.name.FqName
+import org.jetbrains.kotlin.name.Name
 import org.jetbrains.kotlin.psi2ir.generators.DeclarationGenerator
 import org.jetbrains.kotlin.psi2ir.generators.EnumClassMembersGenerator
 import org.jetbrains.kotlin.psi2ir.generators.GeneratorContext
 import org.jetbrains.kotlin.resolve.descriptorUtil.getAllSuperClassifiers
 import org.jetbrains.kotlin.resolve.descriptorUtil.module
 import org.jetbrains.kotlin.types.KotlinType
+import org.jetbrains.kotlin.utils.addToStdlib.firstNotNullResult
 
 // TODO: Consider unification with FunctionIrProvider
 internal class IrProviderForCEnumStubs(
@@ -75,39 +80,65 @@ internal class IrProviderForCEnumStubs(
             irClassSymbol.owner
         }
         return enumClassIr.findDeclaration { symbol.descriptor.name == it.name }
-                ?: error("${symbol.descriptor.name } is not found in enum!")
+                ?: error("${symbol.descriptor.name} is not found in enum!")
     }
 
     private fun provideIrClassForCEnum(descriptor: ClassDescriptor): IrClass =
-        symbolTable.declareClass(
+            symbolTable.declareClass(
+                    startOffset = SYNTHETIC_OFFSET,
+                    endOffset = SYNTHETIC_OFFSET,
+                    origin = IrDeclarationOrigin.IR_EXTERNAL_DECLARATION_STUB,
+                    descriptor = descriptor
+            ).also { enumIrClass ->
+                context.symbolTable.withScope(descriptor) {
+                    descriptor.typeConstructor.supertypes.mapTo(enumIrClass.superTypes) {
+                        it.toIrType()
+                    }
+                    enumIrClass.createParameterDeclarations()
+                    enumClassMembersGenerator.generateSpecialMembers(enumIrClass)
+                    enumIrClass.addMember(createPrimaryConstructor(descriptor).also {
+                        it.parent = enumIrClass
+                    })
+                    val valuePropertyDescriptor: PropertyDescriptor = descriptor.defaultType.memberScope
+                            .getContributedDescriptors()
+                            .filterIsInstance<PropertyDescriptor>()
+                            .filter { it.name.identifier == "value" }
+                            .firstOrNull()
+                            ?: error("No `CEnum.value` property!")
+                    val valueIrField = enumIrClass.addField("value", valuePropertyDescriptor.type.toIrType()).also {
+                        it.parent = enumIrClass
+                    }
+                    enumIrClass.addMember(createValueProperty(enumIrClass, valuePropertyDescriptor, valueIrField))
+                    descriptor.defaultType.memberScope.getContributedDescriptors()
+                    descriptor.enumEntries.mapTo(enumIrClass.declarations) { entryDescriptor ->
+                        createEnumEntry(descriptor, entryDescriptor).also { it.parent = enumIrClass }
+                    }
+                }
+
+                val packageFragmentDescriptor = descriptor.findPackage()
+                val file = filesMap.getOrPut(packageFragmentDescriptor) {
+                    IrFileImpl(NaiveSourceBasedFileEntryImpl("CEnums"), packageFragmentDescriptor).also {
+                        this@IrProviderForCEnumStubs.module?.files?.add(it)
+                    }
+                }
+                enumIrClass.parent = file
+                file.declarations += enumIrClass
+            }
+
+    private fun createValueProperty(irClass: IrClass, propertyDescriptor: PropertyDescriptor, valueIrField: IrField): IrProperty {
+        val irProperty = symbolTable.declareProperty(
                 startOffset = SYNTHETIC_OFFSET,
                 endOffset = SYNTHETIC_OFFSET,
                 origin = IrDeclarationOrigin.IR_EXTERNAL_DECLARATION_STUB,
-                descriptor = descriptor
-        ).also { enumIrClass ->
-            context.symbolTable.withScope(descriptor) {
-                descriptor.typeConstructor.supertypes.mapTo(enumIrClass.superTypes) {
-                    it.toIrType()
-                }
-                enumIrClass.createParameterDeclarations()
-                enumClassMembersGenerator.generateSpecialMembers(enumIrClass)
-                enumIrClass.addMember(createPrimaryConstructor(descriptor).also {
-                    it.parent = enumIrClass
-                })
-                descriptor.enumEntries.mapTo(enumIrClass.declarations) { entryDescriptor ->
-                    createEnumEntry(descriptor, entryDescriptor).also { it.parent = enumIrClass }
-                }
-            }
-
-            val packageFragmentDescriptor = descriptor.findPackage()
-            val file = filesMap.getOrPut(packageFragmentDescriptor) {
-                IrFileImpl(NaiveSourceBasedFileEntryImpl("CEnums"), packageFragmentDescriptor).also {
-                    this@IrProviderForCEnumStubs.module?.files?.add(it)
-                }
-            }
-            enumIrClass.parent = file
-            file.declarations += enumIrClass
+                descriptor = propertyDescriptor
+        )
+        irProperty.parent = irClass
+        irProperty.backingField = valueIrField
+        irProperty.addGetter {
+            returnType = propertyDescriptor.type.toIrType()
         }
+        return irProperty
+    }
 
     private fun createEnumEntry(enumDescriptor: ClassDescriptor, entryDescriptor: ClassDescriptor): IrEnumEntry {
         return symbolTable.declareEnumEntry(
@@ -123,9 +154,27 @@ internal class IrProviderForCEnumStubs(
                     symbol = context.symbolTable.referenceConstructor(enumDescriptor.unsubstitutedPrimaryConstructor!!),
                     typeArgumentsCount = 0 // enums can't be generic
             ).apply {
-                putValueArgument(0, IrConstImpl.int(SYNTHETIC_OFFSET, SYNTHETIC_OFFSET, context.irBuiltIns.intType, 1))
+                putValueArgument(0, extractEnumEntryValue(entryDescriptor))
             }
         }
+    }
+
+    private fun extractEnumEntryValue(entryDescriptor: ClassDescriptor): IrExpression {
+        val base = FqName("kotlinx.cinterop.internal.CEnumEntryValue")
+        val types = setOf(
+                "Byte", "Short", "Int", "Long",
+                "UByte", "UShort", "UInt", "ULong"
+        )
+        fun extractValue(type: String): IrExpression? {
+            val value = entryDescriptor.annotations
+                    .findAnnotation(base.child(Name.identifier(type)))
+                    ?.allValueArguments
+                    ?.getValue(Name.identifier("value"))
+                    ?: return null
+            return context.constantValueGenerator.generateConstantValueAsExpression(SYNTHETIC_OFFSET, SYNTHETIC_OFFSET, value)
+        }
+
+        return types.firstNotNullResult(::extractValue) ?: error("TODO")
     }
 
     private fun createPrimaryConstructor(descriptor: ClassDescriptor): IrConstructor {

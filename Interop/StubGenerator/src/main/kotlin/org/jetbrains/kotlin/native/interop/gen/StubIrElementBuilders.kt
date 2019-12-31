@@ -230,15 +230,17 @@ internal class EnumStubBuilder(
                 }
         val (canonicalConstants, aliasConstants) = enumDef.constants.partition { canonicalsByValue[it.value] == it }
 
-        val canonicalEntriesWithAliases = canonicalConstants.map { constant ->
-            val literal = context.tryCreateIntegralStub(enumDef.baseType, constant.value)
-                    ?: error("Cannot create enum value ${constant.value} of type ${enumDef.baseType}")
-            val entry = EnumEntryStub(constant.name, literal, StubOrigin.EnumEntry(constant))
-            val aliases = aliasConstants
-                    .filter { it.value == constant.value }
-                    .map { constructAliasProperty(it, entry) }
-            entry to aliases
-        }
+        val canonicalEntriesWithAliases = canonicalConstants
+                .sortedBy { it.value } // TODO: Is it stable enough?
+                .mapIndexed { index, constant ->
+                    val literal = context.tryCreateIntegralStub(enumDef.baseType, constant.value)
+                            ?: error("Cannot create enum value ${constant.value} of type ${enumDef.baseType}")
+                    val entry = EnumEntryStub(constant.name, literal, StubOrigin.EnumEntry(constant), index)
+                    val aliases = aliasConstants
+                            .filter { it.value == constant.value }
+                            .map { constructAliasProperty(it, entry) }
+                    entry to aliases
+                }
         val origin = StubOrigin.Enum(enumDef)
         val primaryConstructor = ConstructorStub(
                 parameters = listOf(constructorParameter),

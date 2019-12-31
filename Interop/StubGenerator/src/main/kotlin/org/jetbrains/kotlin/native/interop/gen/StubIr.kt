@@ -467,7 +467,8 @@ class ConstructorStub(
 class EnumEntryStub(
         val name: String,
         val constant: IntegralConstantStub,
-        val origin: StubOrigin.EnumEntry
+        val origin: StubOrigin.EnumEntry,
+        val ordinal: Int
 )
 
 class TypealiasStub(
