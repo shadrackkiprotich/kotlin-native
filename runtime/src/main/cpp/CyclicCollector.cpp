@@ -58,6 +58,8 @@
  */
 namespace {
 
+typedef KStdDeque<ObjHeader*> ObjHeaderDeque;
+
 class Locker {
   pthread_mutex_t* lock_;
  public:
@@ -69,47 +71,148 @@ class Locker {
   }
 };
 
+template <typename func>
+inline void traverseObjectFields(ObjHeader* obj, func process) {
+  const TypeInfo* typeInfo = obj->type_info();
+  if (typeInfo != theArrayTypeInfo) {
+    for (int index = 0; index < typeInfo->objOffsetsCount_; index++) {
+      ObjHeader** location = reinterpret_cast<ObjHeader**>(
+          reinterpret_cast<uintptr_t>(obj) + typeInfo->objOffsets_[index]);
+      process(location);
+    }
+  } else {
+    ArrayHeader* array = obj->array();
+    for (int index = 0; index < array->count_; index++) {
+      process(ArrayAddressOfElementAt(array, index));
+    }
+  }
+}
+
 class CyclicCollector {
   pthread_mutex_t lock_;
   pthread_cond_t cond_;
+  pthread_t gcThread_;
+
   int currentAliveWorkers_;
-  int currentAtRendevouz_;
-  bool shallCallRendevouz_;
-  bool shallCollectRoots_;
   bool shallCollectGarbage_;
+  bool shallRunCollector_;
+  volatile bool terminateCollector_;
   void* firstWorker_;
-  ArrayHeader* roots_;
-  ObjHolder rootsHolder_;
-  KStdMap<ObjHeader*, int> rootsRefCounts_;
+  KStdUnorderedMap<ObjHeader*, int> rootsRefCounts_;
+  KStdUnorderedSet<void*> alreadySeenWorkers_;
+  KStdVector<ObjHeader*> rootset_;
+  KStdVector<ObjHeader**> toRelease_;
 
-  uint32_t currentTick_;
-  uint32_t lastTick_;
-  uint64_t lastTimestampUs_;
+  int gcRunning_;
 
-  void rendezvouzHandler();
-
-  // Here we look at the state of cyclic garbage list, and perform trial deletion using the
-  // refcounts computed on the rendevouz point.
-  void collectLocked() {
-    konan::consolePrintf("collectLocked: %p\n", roots_);
-    if (roots_ == nullptr) return;
-  }
+  int32_t currentTick_;
+  int32_t lastTick_;
+  int64_t lastTimestampUs_;
 
  public:
   CyclicCollector() {
      pthread_mutex_init(&lock_, nullptr);
      pthread_cond_init(&cond_, nullptr);
+     pthread_create(&gcThread_, nullptr, gcWorkerRoutine, this);
   }
 
   ~CyclicCollector() {
+    {
+      Locker locker(&lock_);
+      terminateCollector_ = true;
+      pthread_cond_signal(&cond_);
+    }
+    // TODO: improve.
+    while (atomicGet(&terminateCollector_)) {}
+    for (auto* it: toRelease_) {
+      konan::consolePrintf("deinit %p:%p\n",it, *it);
+      ZeroHeapRef(it);
+    }
     pthread_cond_destroy(&cond_);
     pthread_mutex_destroy(&lock_);
+  }
+
+  static void* gcWorkerRoutine(void* argument) {
+    CyclicCollector* thiz = reinterpret_cast<CyclicCollector*>(argument);
+    thiz->gcProcessor();
+    return nullptr;
+  }
+
+  static void addAtomicRootCallback(void* argument, ObjHeader* obj) {
+      CyclicCollector* thiz = reinterpret_cast<CyclicCollector*>(argument);
+      thiz->addAtomicRoot(obj);
+  }
+
+  void addAtomicRoot(ObjHeader* root) {
+    RuntimeAssert(isAtomicReference(root), "Must be in the atomic rootset");
+    rootset_.push_back(root);
+  }
+
+  bool isAtomicReference(ObjHeader* obj) {
+    return (obj->type_info()->flags_ & TF_LEAK_DETECTOR_CANDIDATE) != 0;
+  }
+
+  void gcProcessor() {
+     {
+       Locker locker(&lock_);
+       KStdDeque<ObjHeader*> toVisit;
+       KStdUnorderedSet<ObjHeader*> visited;
+       while (!terminateCollector_) {
+         pthread_cond_wait(&cond_, &lock_);
+         if (shallRunCollector_) {
+           atomicSet(&gcRunning_, 1);
+           alreadySeenWorkers_.clear();
+           GC_AtomicRootsWalk(addAtomicRootCallback, this);
+           for (auto* root: rootset_) {
+             traverseObjectFields(root, [&toVisit, &visited](ObjHeader** location) {
+               ObjHeader* ref = *location;
+               if (ref != nullptr && visited.count(ref) == 0) {
+                 toVisit.push_back(ref);
+               }
+             });
+             while (toVisit.size() > 0)  {
+               auto* obj = toVisit.front();
+               toVisit.pop_front();
+               if (isAtomicReference(obj)) {
+                 rootsRefCounts_[obj]++;
+               }
+               visited.insert(obj);
+               traverseObjectFields(obj, [&toVisit, &visited](ObjHeader** location) {
+                 ObjHeader* ref = *location;
+                 if (ref != nullptr && visited.count(ref) == 0) {
+                   toVisit.push_back(ref);
+                 }
+               });
+             }
+           }
+           for (auto it: rootsRefCounts_) {
+             konan::consolePrintf("for %p inner %d actual %d\n", it.first, it.second,
+               it.first->container()->refCount());
+             // All references are inner. Actually we compare number of counted
+             // inner references - number of stack references with number of non-stack references.
+             if (it.second == it.first->container()->refCount()) {
+               traverseObjectFields(it.first, [this](ObjHeader** location) {
+                  toRelease_.push_back(location);
+               });
+             }
+           }
+           rootsRefCounts_.clear();
+           rootset_.clear();
+           visited.clear();
+           RuntimeAssert(toVisit.size() == 0, "Must be clear");
+           atomicSet(&gcRunning_, 0);
+           shallRunCollector_ = false;
+         }
+       }
+       terminateCollector_ = false;
+     }
+     konan::consolePrintf("GC finished\n");
   }
 
   void addWorker(void* worker) {
     Locker lock(&lock_);
     // We need to identify the main thread to avoid calling longer running code
-    // on the first worker, as we assume is being the UI thread.
+    // on the first worker, as we assume it being the UI thread.
     if (firstWorker_ == nullptr) firstWorker_ = worker;
     currentAliveWorkers_++;
   }
@@ -117,82 +220,86 @@ class CyclicCollector {
   void removeWorker(void* worker) {
     Locker lock(&lock_);
     // When exiting the worker - we shall collect the cyclic garbage here.
-    collectLocked();
+    shallCollectGarbage_ = true;
+    rendezvouzLocked(worker);
     currentAliveWorkers_--;
   }
 
-  void checkIfShallCollectLocked() {
-    currentTick_++;
-    auto delta = currentTick_ - lastTick_;
+  // TODO: this mechanism doesn't allow proper handling of references passed from one stack
+  // to another between rendezvouz points.
+  void addRoot(ObjHeader* obj) {
+    Locker lock(&lock_);
+    rootsRefCounts_[obj] = 0;
+  }
+
+  void removeRoot(ObjHeader* obj) {
+    Locker lock(&lock_);
+    rootsRefCounts_.erase(obj);
+  }
+
+  bool checkIfShallCollect() {
+    auto tick = atomicAdd(&currentTick_, 1);
+    if (shallCollectGarbage_) return true;
+    auto delta = tick - atomicGet(&lastTick_);
     if (delta > 10 || delta < 0) {
        auto currentTimestampUs = konan::getTimeMicros();
-       if (currentTimestampUs - lastTimestampUs_ > 10000) {
+       if (currentTimestampUs - atomicGet(&lastTimestampUs_) > 10000) {
+         Locker locker(&lock_);
          lastTick_ = currentTick_;
          lastTimestampUs_ = currentTimestampUs;
-         shallCollectRoots_ = true;
-         shallCallRendevouz_ = true;
+         shallCollectGarbage_ = true;
+         return true;
        }
     }
+    return false;
+  }
+
+  static void heapCounterCallback(void* argument, ObjHeader* obj) {
+    CyclicCollector* collector = reinterpret_cast<CyclicCollector*>(argument);
+    collector->countLocked(obj, 1);
+  }
+
+  static void stackCounterCallback(void* argument, ObjHeader* obj) {
+      CyclicCollector* collector = reinterpret_cast<CyclicCollector*>(argument);
+      collector->countLocked(obj, -1);
+    }
+
+  void countLocked(ObjHeader* obj, int delta) {
+    if (isAtomicReference(obj)) {
+      rootsRefCounts_[obj] += delta;
+    }
+  }
+
+  void rendezvouzLocked(void* worker) {
+    if (toRelease_.size() > 0) {
+      for (auto* it: toRelease_) {
+        ZeroHeapRef(it);
+      }
+      toRelease_.clear();
+    }
+    if (alreadySeenWorkers_.count(worker) > 0) {
+      return;
+    }
+    GC_StackWalk(stackCounterCallback, this);
+    alreadySeenWorkers_.insert(worker);
+    if (alreadySeenWorkers_.size() == currentAliveWorkers_) {
+       // All workers processed, initiate GC.
+       shallRunCollector_ = true;
+       pthread_cond_signal(&cond_);
+     }
   }
 
   void rendezvouz(void* worker) {
+    if (atomicGet(&gcRunning_) != 0 || !checkIfShallCollect()) return;
     Locker lock(&lock_);
-    currentAtRendevouz_++;
-    checkIfShallCollectLocked();
-    if (!shallCallRendevouz_ && shallCollectGarbage_) {
-      // TODO: maybe check worker != firstWorker_?
-      collectLocked();
-    }
-    if (shallCallRendevouz_) {
-      while (currentAtRendevouz_ < currentAliveWorkers_ && shallCallRendevouz_) {
-        pthread_cond_wait(&cond_, &lock_);
-      }
-      if (shallCallRendevouz_) {
-        rendezvouzHandler();
-        shallCallRendevouz_ = false;
-      }
-    }
-    currentAtRendevouz_--;
+    rendezvouzLocked(worker);
   }
 
-  void scheduleGarbageCollect();
-};
-
-// Note that this code is executed on the rendevouz between all workers, and as such
-// must be very short running.
-void CyclicCollector::rendezvouzHandler() {
-  konan::consolePrintf("at rendezvouz!!");
-  if (shallCollectRoots_ && roots_ == nullptr) {
-    shallCollectRoots_ = false;
-    roots_ = Kotlin_native_internal_GC_detectCycles(nullptr, rootsHolder_.slot())->array();
-    if (roots_ != nullptr) {
-      ObjHeader** current = ArrayAddressOfElementAt(roots_, 0);
-      auto count = roots_->count_;
-      // Remember the value of the reference counter at the rendevouz moment.
-      for (int i = 0; i < count; i++, current++) {
-        ObjHeader* obj = *current;
-        rootsRefCounts_[obj] = obj->container()->refCount();
-      }
-      // Let others increment RCs according to their stack slots.
-      //......
-      // Finally, in the GC phase we'll do the following: we compute effective RC
-      // coming from inner references of collected cycles. For objects with coinciding values
-      // - it means there's no external references and we can collect such objects. We may not
-      // even do that, and instead just zero out all object references coming out of such objects -
-      // effect will be the same.
-      shallCollectGarbage_ = true;
-    }
-  }
-}
-
-void CyclicCollector::scheduleGarbageCollect() {
-  Locker lock(&lock_);
-  shallCallRendevouz_ = true;
-  if (roots_ == nullptr)
-    shallCollectRoots_ = true;
-  else
+  void scheduleGarbageCollect() {
+    Locker lock(&lock_);
     shallCollectGarbage_ = true;
-}
+  }
+};
 
 CyclicCollector* cyclicCollector = nullptr;
 
@@ -235,5 +342,17 @@ void cyclicRendezvouz(void* worker) {
 void cyclicScheduleGarbageCollect() {
 #if WITH_WORKERS
   cyclicCollector->scheduleGarbageCollect();
+#endif  // WITH_WORKERS
+}
+
+void cyclicAddAtomicRoot(ObjHeader* obj) {
+#if WITH_WORKERS
+  cyclicCollector->addRoot(obj);
+#endif  // WITH_WORKERS
+}
+
+void cyclicRemoveAtomicRoot(ObjHeader* obj) {
+#if WITH_WORKERS
+  cyclicCollector->removeRoot(obj);
 #endif  // WITH_WORKERS
 }

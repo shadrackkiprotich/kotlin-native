@@ -559,7 +559,9 @@ ObjHeader** LookupTLS(void** key, int index) RUNTIME_NOTHROW;
 void GC_RegisterWorker(void* worker) RUNTIME_NOTHROW;
 void GC_UnregisterWorker(void* worker) RUNTIME_NOTHROW;
 void GC_RendezvouzCallback(void* worker) RUNTIME_NOTHROW;
-OBJ_GETTER(Kotlin_native_internal_GC_detectCycles, ObjHeader*) RUNTIME_NOTHROW;
+typedef void (*object_callback_t)(void* argument, ObjHeader* obj);
+void GC_StackWalk(object_callback_t callback, void* argument);
+void GC_AtomicRootsWalk(object_callback_t callback, void* argument);
 
 #ifdef __cplusplus
 }

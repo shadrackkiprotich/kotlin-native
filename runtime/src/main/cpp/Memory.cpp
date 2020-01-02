@@ -947,6 +947,7 @@ void runDeallocationHooks(ContainerHeader* container) {
         if (obj == g_leakCheckerGlobalList)
           g_leakCheckerGlobalList = next;
         unlock(&g_leakCheckerGlobalLock);
+        cyclicAddAtomicRoot(obj);
       }
       ObjHeader::destroyMetaObject(&obj->typeInfoOrMeta_);
     }
@@ -1753,6 +1754,10 @@ MemoryState* initMemory() {
 
 void deinitMemory(MemoryState* memoryState) {
 #if USE_GC
+  bool lastMemoryState = atomicAdd(&aliveMemoryStatesCount, -1) == 0;
+  if (lastMemoryState) {
+   cyclicDeinit();
+  }
   // Actual GC only implemented in strict memory model at the moment.
   do {
     GC_LOG("Calling garbageCollect from DeinitMemory()\n")
@@ -1769,11 +1774,6 @@ void deinitMemory(MemoryState* memoryState) {
   RuntimeAssert(memoryState->finalizerQueueSize == 0, "Finalizer queue must be empty");
 
 #endif // USE_GC
-
-  bool lastMemoryState = atomicAdd(&aliveMemoryStatesCount, -1) == 0;
-  if (lastMemoryState) {
-    cyclicDeinit();
-  }
 
 #if TRACE_MEMORY
   if (IsStrictMemoryModel && lastMemoryState && allocCount > 0) {
@@ -1943,6 +1943,7 @@ OBJ_GETTER(allocInstance, const TypeInfo* type_info) {
     if (old != nullptr)
       old->meta_object()->LeakDetector.previous_ = obj;
     unlock(&g_leakCheckerGlobalLock);
+    cyclicRemoveAtomicRoot(obj);
   }
 #if USE_GC
   if (Strict) {
@@ -2829,6 +2830,31 @@ ArrayHeader* ArenaContainer::PlaceArray(const TypeInfo* type_info, uint32_t coun
   return result;
 }
 
+
+void GC_StackWalk(object_callback_t callback, void* argument) {
+  FrameOverlay* frame = currentFrame;
+  while (frame != nullptr) {
+    ObjHeader** current = reinterpret_cast<ObjHeader**>(frame + 1) + frame->parameters;
+    ObjHeader** end = current + frame->count - kFrameOverlaySlots - frame->parameters;
+    while (current < end) {
+      ObjHeader* obj = *current++;
+      if (obj != nullptr) {
+        callback(argument, obj);
+      }
+    }
+    frame = frame->previous;
+  }
+}
+
+void GC_AtomicRootsWalk(object_callback_t callback, void* argument) {
+  lock(&g_leakCheckerGlobalLock);
+  auto* candidate = g_leakCheckerGlobalList;
+  while (candidate != nullptr) {
+    callback(argument, candidate);
+    candidate = candidate->meta_object()->LeakDetector.next_;
+  }
+  unlock(&g_leakCheckerGlobalLock);
+}
 
 // API of the memory manager.
 extern "C" {
