@@ -1756,6 +1756,7 @@ void deinitMemory(MemoryState* memoryState) {
 #if USE_GC
   bool lastMemoryState = atomicAdd(&aliveMemoryStatesCount, -1) == 0;
   if (lastMemoryState) {
+   garbageCollect(memoryState, true);
    cyclicDeinit();
   }
   // Actual GC only implemented in strict memory model at the moment.
@@ -3197,19 +3198,11 @@ KRef* LookupTLS(void** key, int index) {
 
 
 void GC_RegisterWorker(void* worker) {
-  konan::consolePrintf("register %p\n", worker);
   cyclicAddWorker(worker);
 }
 
 void GC_UnregisterWorker(void* worker) {
-  konan::consolePrintf("unregister %p\n", worker);
   cyclicRemoveWorker(worker);
-}
-
-void GC_RendezvouzCallback(void* worker) {
-  konan::consolePrintf("%p: alive %d, I am %p\n", worker, aliveMemoryStatesCount, memoryState);
-  if (g_hasCyclicCollector)
-    cyclicRendezvouz(worker);
 }
 
 KBoolean Kotlin_native_internal_GC_getCyclicCollector() {

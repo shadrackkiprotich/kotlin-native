@@ -58,8 +58,6 @@
  */
 namespace {
 
-typedef KStdDeque<ObjHeader*> ObjHeaderDeque;
-
 class Locker {
   pthread_mutex_t* lock_;
  public:
@@ -94,23 +92,21 @@ class CyclicCollector {
   pthread_t gcThread_;
 
   int currentAliveWorkers_;
+  int gcRunning_;
   bool shallCollectGarbage_;
   bool shallRunCollector_;
-  volatile bool terminateCollector_;
-  void* firstWorker_;
+  bool terminateCollector_;
+  int32_t currentTick_;
+  int32_t lastTick_;
+  int64_t lastTimestampUs_;
   KStdUnorderedMap<ObjHeader*, int> rootsRefCounts_;
   KStdUnorderedSet<void*> alreadySeenWorkers_;
   KStdVector<ObjHeader*> rootset_;
   KStdVector<ObjHeader**> toRelease_;
 
-  int gcRunning_;
-
-  int32_t currentTick_;
-  int32_t lastTick_;
-  int64_t lastTimestampUs_;
-
  public:
   CyclicCollector() {
+     // TODO: check rc.
      pthread_mutex_init(&lock_, nullptr);
      pthread_cond_init(&cond_, nullptr);
      pthread_create(&gcThread_, nullptr, gcWorkerRoutine, this);
@@ -120,12 +116,12 @@ class CyclicCollector {
     {
       Locker locker(&lock_);
       terminateCollector_ = true;
+      shallRunCollector_ = true;
       pthread_cond_signal(&cond_);
     }
     // TODO: improve.
     while (atomicGet(&terminateCollector_)) {}
     for (auto* it: toRelease_) {
-      konan::consolePrintf("deinit %p:%p\n",it, *it);
       ZeroHeapRef(it);
     }
     pthread_cond_destroy(&cond_);
@@ -149,7 +145,7 @@ class CyclicCollector {
   }
 
   bool isAtomicReference(ObjHeader* obj) {
-    return (obj->type_info()->flags_ & TF_LEAK_DETECTOR_CANDIDATE) != 0;
+    return (obj->type_info()->flags_ & TF_LEAK_DETECTOR_CANDIDATE) != 0 && obj->container()->frozen();
   }
 
   void gcProcessor() {
@@ -186,10 +182,10 @@ class CyclicCollector {
              }
            }
            for (auto it: rootsRefCounts_) {
-             konan::consolePrintf("for %p inner %d actual %d\n", it.first, it.second,
-               it.first->container()->refCount());
-             // All references are inner. Actually we compare number of counted
-             // inner references - number of stack references with number of non-stack references.
+             // konan::consolePrintf("for %p inner %d actual %d\n", it.first, it.second, it.first->container()->refCount());
+             // All references are inner. Actually we compare the number of counted
+             // inner references - number of stack references with the number of non-stack references
+             // actualized in reference counter.
              if (it.second == it.first->container()->refCount()) {
                traverseObjectFields(it.first, [this](ObjHeader** location) {
                   toRelease_.push_back(location);
@@ -206,14 +202,10 @@ class CyclicCollector {
        }
        terminateCollector_ = false;
      }
-     konan::consolePrintf("GC finished\n");
   }
 
   void addWorker(void* worker) {
     Locker lock(&lock_);
-    // We need to identify the main thread to avoid calling longer running code
-    // on the first worker, as we assume it being the UI thread.
-    if (firstWorker_ == nullptr) firstWorker_ = worker;
     currentAliveWorkers_++;
   }
 
@@ -318,6 +310,7 @@ void cyclicDeinit() {
 #if WITH_WORKERS
   RuntimeAssert(cyclicCollector != nullptr, "Must be inited");
   konanDestructInstance(cyclicCollector);
+  cyclicCollector = nullptr;
 #endif  // WITH_WORKERS
 }
 
@@ -347,12 +340,14 @@ void cyclicScheduleGarbageCollect() {
 
 void cyclicAddAtomicRoot(ObjHeader* obj) {
 #if WITH_WORKERS
-  cyclicCollector->addRoot(obj);
+  if (cyclicCollector)
+    cyclicCollector->addRoot(obj);
 #endif  // WITH_WORKERS
 }
 
 void cyclicRemoveAtomicRoot(ObjHeader* obj) {
 #if WITH_WORKERS
-  cyclicCollector->removeRoot(obj);
+  if (cyclicCollector)
+    cyclicCollector->removeRoot(obj);
 #endif  // WITH_WORKERS
 }

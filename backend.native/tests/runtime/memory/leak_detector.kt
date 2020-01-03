@@ -23,8 +23,7 @@ fun test1() {
     val cycles = GC.detectCycles()!!
     //assertEquals(1, cycles.size)
     //assertTrue(arrayOf(a).contentEquals(GC.findCycle(cycles[0])!!))
-    //a.value = null
-    println(cycles.joinToString(", "))
+    // a.value = null
 }
 
 class Holder(var other: Any?)
@@ -34,9 +33,9 @@ fun test2() {
     val obj1 = Holder(array).freeze()
     array[0].value = obj1
     val cycles = GC.detectCycles()!!
-    assertEquals(1, cycles.size)
-    assertTrue(arrayOf(obj1, array, array[0]).contentEquals(GC.findCycle(cycles[0])!!))
-    array[0].value = null
+    //assertEquals(1, cycles.size)
+    //assertTrue(arrayOf(obj1, array, array[0]).contentEquals(GC.findCycle(cycles[0])!!))
+    //array[0].value = null
 }
 
 fun test3() {
@@ -50,15 +49,16 @@ fun test3() {
     }
     a1.value = head
     current.other = a1
-    val cycles = GC.detectCycles()!!
-    assertEquals(1, cycles.size)
-    val cycle = GC.findCycle(cycles[0])!!
-    assertEquals(32, cycle.size)
-    a1.value = null
+    current.freeze()
+    //val cycles = GC.detectCycles()!!
+    //assertEquals(1, cycles.size)
+    //val cycle = GC.findCycle(cycles[0])!!
+    //assertEquals(32, cycle.size)
+    //a1.value = null
 }
 
 fun main() {
     test1()
-    //test2()
+    test2()
     //test3()
 }
